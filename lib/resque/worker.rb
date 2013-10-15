@@ -127,36 +127,42 @@ module Resque
 
       loop do
         break if shutdown?
+        
+        begin
+          if not paused? and job = reserve
+            log "got: #{job.inspect}"
+            job.worker = self
+            working_on job
 
-        if not paused? and job = reserve
-          log "got: #{job.inspect}"
-          job.worker = self
-          working_on job
-
-          if @child = fork(job)
-            srand # Reseeding
-            procline "Forked #{@child} at #{Time.now.to_i}"
-            begin
-              Process.waitpid(@child)
-            rescue SystemCallError
-              nil
+            if @child = fork(job)
+              srand # Reseeding
+              procline "Forked #{@child} at #{Time.now.to_i}"
+              begin
+                Process.waitpid(@child)
+              rescue SystemCallError
+                nil
+              end
+              job.fail(DirtyExit.new($?.to_s)) if $?.signaled?
+            else
+              unregister_signal_handlers if will_fork? && term_child
+              procline "Processing #{job.queue} since #{Time.now.to_i} [#{job.payload_class}]"
+              reconnect
+              perform(job, &block)
+              exit!(true) if will_fork?
             end
-            job.fail(DirtyExit.new($?.to_s)) if $?.signaled?
-          else
-            unregister_signal_handlers if will_fork? && term_child
-            procline "Processing #{job.queue} since #{Time.now.to_i} [#{job.payload_class}]"
-            reconnect
-            perform(job, &block)
-            exit!(true) if will_fork?
-          end
 
-          done_working
-          @child = nil
-        else
-          break if interval.zero?
-          log! "Sleeping for #{interval} seconds"
-          procline paused? ? "Paused" : "Waiting for #{@queues.join(',')}"
-          sleep interval
+            done_working
+            @child = nil
+          else
+            break if interval.zero?
+            log! "Sleeping for #{interval} seconds"
+            procline paused? ? "Paused" : "Waiting for #{@queues.join(',')}"
+            sleep interval
+          end
+        rescue Redis::TimeoutError
+          log "Got a timeout, reconnecting and retrying"
+          reconnect
+          retry
         end
       end
 
